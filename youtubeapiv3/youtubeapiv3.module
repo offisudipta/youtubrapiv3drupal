@@ -1,0 +1,202 @@
+<?php
+require_once(libraries_get_path('google-api-php-client-2.2.2').'/vendor/autoload.php');
+
+function youtubeapiv3_menu(){
+	$items = array();
+	$items['admin/config/services/youtube-api-settings/settings'] = array(
+		'title' => 'Youtube API settings',
+		'description' => 'Settings page for configuring common Youtube API settings',
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('youtubeapiv3_admin_settings_form'),
+		'access arguments' => array('administer youtubeapi settings'),
+		'type' => MENU_LOCAL_TASK,
+	);
+	$items['admin/config/services/youtube-api-settings/add-youtube-nodes'] = array(
+    'title' => 'Youtube API settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10
+  );
+	$items['admin/config/services/youtube-api-settings'] = array(
+		'title' => 'Youtube API add nodes',
+		'description' => 'Form for adding New Youtube nodes',
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('youtubeapiv3_add_node'),
+		'access arguments' => array('administer youtubeapi settings'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	$items['youtube/oauthcallback'] = array(
+		'title' => 'Oatuth Callback',
+		'page callback' => 'youtubeapiv3_oauthcallback',
+		'access callback' => array(1),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	return $items;
+}
+
+function youtubeapiv3_admin_settings_form($form){
+	$form = array();
+	$form['youtubeapi_clientid'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Client ID'),
+		'#default_value' => variable_get('youtubeapi_clientid', ''),
+		'#description' => t("Enter the Client ID to Access Youtube API v3"),
+	);
+	$form['youtubeapi_clientsecret'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Client Secret'),
+		'#default_value' => variable_get('youtubeapi_clientsecret', ''),
+		'#description' => t("Enter the Client Secret to Access Youtube API v3"),
+	);
+	$form['submit'] = array(
+		'#type' => 'submit',
+		'#value' => t('Submit'),
+	);
+  return $form;
+}
+
+function youtubeapiv3_add_node(){
+	$form = array();
+	$form['youtubeapi_keyword'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Keywork for search'),
+		'#description' => t("Enter the keyword you want to search in youtube"),
+	);
+	$form['submit'] = array(
+		'#type' => 'submit',
+		'#value' => t('Submit'),
+	);
+	$form['#validate'] = array('youtubeapiv3_add_node_validate');
+  return $form;
+}
+
+function youtubeapiv3_oauthcallback(){
+	if ($_GET['code']) {
+		$client = new Google_Client();
+		$client->setClientId(variable_get('youtubeapi_clientid'));
+		$client->setClientSecret(variable_get('youtubeapi_clientsecret'));
+		$client->setScopes('https://www.googleapis.com/auth/youtube.force-ssl');
+		if ($client) {
+		  $client->setRedirectUri(url('youtube/oauthcallback', array('absolute' => TRUE)));
+		  $client->authenticate($_GET['code']);
+		  variable_set('youtubeapiv3_access_token', $client->getAccessToken());
+		  drupal_set_message('Settings have been saved.','status');
+		}else{
+			drupal_set_message('Failed to authenticate with Google.','error');
+		}
+	}
+	drupal_goto('admin/config/youtube-api-settings');
+}
+
+function youtubeapiv3_admin_settings_form_submit($form, &$form_state){
+	$client = new Google_Client();
+	$client->setClientId($form_state['values']['youtubeapi_clientid']);
+	$client->setClientSecret($form_state['values']['youtubeapi_clientsecret']);
+	$client->setScopes('https://www.googleapis.com/auth/youtube.force-ssl');
+	$client->setRedirectUri('http://' . $_SERVER['HTTP_HOST'] . '/drupal/youtube/oauthcallback');
+	$client->setAccessType('offline');        // offline access
+	$client->setIncludeGrantedScopes(true);   // incremental auth
+	$auth_url = $client->createAuthUrl();
+	drupal_goto($auth_url);
+}
+
+function youtubeapiv3_add_node_validate($form, &$form_state){
+	$keyword = $form_state['values']['youtubeapi_keyword'];
+	if(!count(taxonomy_get_term_by_name($keyword))){
+		$vid = taxonomy_vocabulary_machine_name_load('youtube_tags')->vid;
+		$term = new stdClass();
+		$term->name = $keyword;
+		$term->vid = $vid;
+		taxonomy_term_save($term);
+		$client = new Google_Client();
+		$client->setClientId(variable_get('youtubeapi_clientid'));
+		$client->setClientSecret(variable_get('youtubeapi_clientsecret'));
+		$client->setScopes('https://www.googleapis.com/auth/youtube.force-ssl');
+		$client->setAccessToken(variable_get('youtubeapiv3_access_token'));
+		$youtube = new Google_Service_YouTube($client);
+		$searchResponse  = $youtube->search->listSearch('id,snippet', array(
+		  'q' => $keyword,
+		  'maxResults' => 20,
+		  'type' => 'video',
+		));
+		$num_operations = count($searchResponse->items);
+		for ($i = 0; $i < $num_operations; $i++) {
+			$operations[] = array(
+			  'youtubeapiv3_add_node_batch',
+			  array($searchResponse->items[$i],
+				t('(Operation @operation)', array(
+				  '@operation' => $i,
+				)),
+			  ),
+			);
+		}
+		if($num_operations){
+			$batch = array(
+				'operations' => $operations,
+				'finished' => 'youtubeapiv3_add_node_batch_finished',
+			);
+			batch_set($batch);
+			batch_process('admin/config/services/youtube-api-settings/add-youtube-nodes');
+		}else{
+			form_set_error('Keyword came up with blank results','error');
+		}
+	}else{
+		drupal_set_message('This keyword already exists, try new keywords','error');
+	}
+}
+function youtubeapiv3_add_node_batch($item, $operation_details, &$context) {
+	global $user;
+	$context['results'][] = $item->id->videoId . ' : ' . check_plain($item->snippet->title);
+	$node = new stdClass();
+	$node->title = substr(check_plain($item->snippet->title),0,60);
+	$node->type = "youtube_videos";
+	node_object_prepare($node);
+	$node->language = LANGUAGE_NONE;
+	$node->uid = $user->uid;
+	$node->status = 1; 
+	$node->promote = 0; 
+	$node->comment = 0;
+	$node->field_videoid[$node->language][]['value'] = substr($item->id->videoId,0,255);
+	$node->field_videotitle[$node->language][]['value'] = substr($item->snippet->title,0,255);
+	$node->field_description[$node->language][]['value'] = substr($item->snippet->description,0,255);
+	$node = node_submit($node);
+	node_save($node);
+	
+	
+	
+  // Optional message displayed under the progressbar.
+  $context['message'] = t('Creating node "@title"', array(
+    '@title' => substr(check_plain($item->snippet->title),0,60),
+  )) . ' ' . $operation_details;
+  youtubeapiv3_add_node_batch_update_http_requests();
+}
+function youtubeapiv3_add_node_batch_update_http_requests() {
+  $_SESSION['http_request_count']++;
+}
+function youtubeapiv3_add_node_batch_get_http_requests() {
+  return !empty($_SESSION['http_request_count']) ? $_SESSION['http_request_count'] : 0;
+}
+
+function youtubeapiv3_add_node_batch_finished($success, $results, $operations) {
+  if ($success) {
+
+    // Here we could do something meaningful with the results.
+    // We just display the number of nodes we processed...
+    drupal_set_message(t('@count results processed in @requests HTTP requests.', array(
+      '@count' => count($results),
+      '@requests' => youtubeapiv3_add_node_batch_get_http_requests(),
+    )));
+    drupal_set_message(t('The final result was "%final"', array(
+      '%final' => end($results),
+    )));
+  }
+  else {
+
+    // An error occurred.
+    // $operations contains the operations that remained unprocessed.
+    $error_operation = reset($operations);
+    drupal_set_message(t('An error occurred while processing @operation with arguments : @args', array(
+      '@operation' => $error_operation[0],
+      '@args' => print_r($error_operation[0], TRUE),
+    )), 'error');
+  }
+}

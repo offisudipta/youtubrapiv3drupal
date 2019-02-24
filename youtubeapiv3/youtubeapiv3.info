@@ -1,0 +1,5 @@
+name = Youtube API v3
+description = Module for Integrating Youtube API v3 with Drupal
+core = 7.x
+
+dependencies[] = libraries
